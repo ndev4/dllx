@@ -1,0 +1,7 @@
+[package]
+name = "dllx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+object = { version = "0.40.0", default-features = false, features = ["read_core", "pe", "std"] }
