@@ -1,9 +1,12 @@
 //! dllx: list the DLLs a Windows executable or DLL depends on, in the same
-//! format as `ldd`. Files are only read and parsed, never loaded or run, so
-//! it is safe to use on untrusted binaries.
+//! format as `ldd`. The file being inspected is only read and parsed, never
+//! loaded or run, so it is safe to use on untrusted binaries. (The optional
+//! --load-addr flag maps trusted system DLLs to read their live load address
+//! without running any of their code; the inspected file is still never loaded.)
 
 mod apiset;
 mod knowndlls;
+mod loadaddr;
 mod pe;
 mod search;
 
@@ -31,17 +34,23 @@ Print the DLLs each FILE depends on, without loading or running it.
 
       --posix-paths    print paths as /c/... instead of C:\\...
       --delay          also list delay-loaded DLLs, marked [delay]
-      --pretty         line up the => arrows
-  -h, --help          show this help and exit
+  -p, --pretty         line up the => arrows
+  -l, --load-addr      show the live per-boot load address of system DLLs,
+                       like ldd; others keep their header base, marked
+                       [image base]. The inspected FILE is never loaded.
+  -h, --help           show this help and exit
   -V, --version        show the version and exit
 
-Addresses are the preferred image base from each DLL's header.
+By default, addresses are the preferred image base from each DLL's header.
+With --load-addr, system DLLs instead show where they are actually mapped this
+boot, read by mapping the trusted system image without running any of its code.
 ";
 
 struct Options {
     posix_paths: bool,
     delay: bool,
     pretty: bool,
+    load_addr: bool,
 }
 
 struct Entry {
@@ -51,7 +60,7 @@ struct Entry {
 }
 
 fn main() -> ExitCode {
-    let mut options = Options { posix_paths: false, delay: false, pretty: false };
+    let mut options = Options { posix_paths: false, delay: false, pretty: false, load_addr: false };
     let mut files = Vec::new();
     let mut only_files = false;
     for arg in std::env::args_os().skip(1) {
@@ -60,7 +69,8 @@ fn main() -> ExitCode {
             Some("--") => only_files = true,
             Some("--posix-paths") => options.posix_paths = true,
             Some("--delay") => options.delay = true,
-            Some("--pretty") => options.pretty = true,
+            Some("-p" | "--pretty") => options.pretty = true,
+            Some("-l" | "--load-addr") => options.load_addr = true,
             Some("-h" | "--help") => {
                 print!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -116,8 +126,19 @@ fn list(file: &Path, options: &Options, out: &mut impl Write) -> Result<(), Stri
     for entry in entries {
         let mut line = format!("\t{:width$} => ", entry.name);
         match &entry.found {
-            Some((path, base)) => {
-                line += &format!("{} (0x{base:x})", display_path(path, options.posix_paths));
+            Some((path, image_base)) => {
+                line += &display_path(path, options.posix_paths);
+                // --load-addr shows the live base for system DLLs (mapped
+                // without running their code); private DLLs have no fixed
+                // runtime base, so they keep the header value, marked.
+                let live = (options.load_addr && resolver.is_system(path))
+                    .then(|| loadaddr::base_of(path))
+                    .flatten();
+                match live {
+                    Some(addr) => line += &format!(" (0x{addr:x})"),
+                    None if options.load_addr => line += &format!(" (0x{image_base:x} [image base])"),
+                    None => line += &format!(" (0x{image_base:x})"),
+                }
             }
             None => line += "not found",
         }
