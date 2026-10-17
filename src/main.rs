@@ -31,6 +31,7 @@ const IMPLICIT_NATIVE: &[&str] = &["ntdll.dll"];
 const USAGE: &str = "\
 Usage: dllx [OPTION]... FILE...
 Print the DLLs each FILE depends on, without loading or running it.
+Each FILE is preceded by a header naming its architecture and type.
 
       --posix-paths    print paths as /c/... instead of C:\\...
       --delay          also list delay-loaded DLLs, marked [delay]
@@ -95,9 +96,6 @@ fn main() -> ExitCode {
     let mut status = ExitCode::SUCCESS;
     for file in &files {
         let shown = sanitize(&file.to_string_lossy());
-        if files.len() > 1 {
-            let _ = writeln!(out, "{shown}:");
-        }
         if let Err(message) = list(file, &options, &mut out) {
             let _ = out.flush();
             eprintln!("dllx: {shown}: {message}");
@@ -111,6 +109,7 @@ fn list(file: &Path, options: &Options, out: &mut impl Write) -> Result<(), Stri
     let data = read_file(file).map_err(|e| e.to_string())?;
     let root = pe::parse(&data).map_err(str::to_string)?;
     drop(data);
+    writeln!(out, "{}: {}", sanitize(&file.to_string_lossy()), describe(&root)).map_err(|e| e.to_string())?;
     if root.damaged {
         eprintln!("dllx: warning: {}: damaged import table, list may be incomplete", sanitize(&file.to_string_lossy()));
     }
@@ -265,6 +264,23 @@ fn escape(raw: &[u8]) -> String {
 /// Replaces control characters so a file name cannot inject terminal escapes.
 fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
+/// One-line summary of the image for the file header: architecture, whether it
+/// is an executable or a DLL, its address width, and whether it is a native
+/// (kernel/subsystem) image.
+fn describe(root: &pe::Module) -> String {
+    let kind = if root.is_dll { "library" } else { "executable" };
+    let native = if root.native { " (native)" } else { "" };
+    let (arch, bits) = match root.machine {
+        0x014c => ("i386", "32-bit"),
+        0x8664 => ("x86-64", "64-bit"),
+        0x01c4 => ("ARM Thumb-2", "32-bit"),
+        0xaa64 => ("ARM64", "64-bit"),
+        0x0200 => ("IA-64", "64-bit"),
+        other => return format!("machine 0x{other:04x} {kind}, unknown width{native}"),
+    };
+    format!("{arch} {kind}, {bits}{native}")
 }
 
 fn display_path(path: &Path, posix: bool) -> String {
